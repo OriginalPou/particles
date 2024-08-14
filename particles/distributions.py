@@ -1171,9 +1171,14 @@ class StructDist(ProbDist):
 
     def logpdf(self, theta):
         lp = 0.0
+        i = 0
         for par, law in self.laws.items():
             cond_law = law(theta) if callable(law) else law
-            lp += cond_law.logpdf(theta[par])
+            try :
+                lp += cond_law.logpdf(theta[par])
+            except:
+                lp += cond_law.logpdf(theta[:,i])
+                i += 1
         return lp
 
     def rvs(self, size=1):  # Default for size is 1, not None

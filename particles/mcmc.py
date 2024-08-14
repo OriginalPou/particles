@@ -177,7 +177,7 @@ class MCMC:
                 self.step0()
             else:
                 self.step(n)
-            if self.verbose > 0 and (n * self.verbose) % self.niter == 0:
+            if self.verbose > 0 : #and (n * self.verbose) % self.niter == 0:
                 self.print_progress(n)
 
 

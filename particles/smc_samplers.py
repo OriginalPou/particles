@@ -209,6 +209,8 @@ from particles.collectors import Collector
 from particles.state_space_models import Bootstrap
 from particles.variance_mcmc import MCMC_variance
 
+from mpi4py import MPI
+
 ###################################
 # Static models
 
@@ -1061,6 +1063,8 @@ class SMC2(FKSMCsampler):
         length of MCMC chain (default: 10)
     move : MCMCSequence object
         MCMC sequence
+    mpi : bool
+        using message passing interface (default: 0)
     """
 
     def __init__(
@@ -1075,6 +1079,7 @@ class SMC2(FKSMCsampler):
         wastefree=True,
         len_chain=10,
         move=None,
+        mpi = 0,
     ):
         super().__init__(self, wastefree=wastefree, len_chain=len_chain, move=move)
         # switch off collection of basic summaries (takes too much memory)
@@ -1091,6 +1096,12 @@ class SMC2(FKSMCsampler):
         self.data = data
         self.init_Nx = init_Nx
         self.ar_to_increase_Nx = ar_to_increase_Nx
+        self.mpi = mpi
+        if self.mpi != 0 :
+            self.thetas_mpi = None
+            self.comm = MPI.COMM_WORLD
+            self.size = self.comm.Get_size()
+            self.rank = self.comm.Get_rank()
 
     @property
     def T(self):
@@ -1105,15 +1116,28 @@ class SMC2(FKSMCsampler):
         low_ar = ar < self.ar_to_increase_Nx
         we_increase_Nx = low_ar & x.shared.get("rs_flag", False)
         if we_increase_Nx:
-            liw_Nx = self.exchange_step(x, t, 2 * x.pfs[0].N)
+            if self.mpi == 0 :
+                liw_Nx = self.exchange_step(x, t, 40 +  x.pfs[0].N)
+            else :
+                liw_Nx = self.exchange_step(x, t, 40 +  self.x_pfs[0].N)
         # compute (estimate of) log p(y_t|\theta,y_{0:t-1})
         lpyt = np.empty(shape=x.N)
-        for m, pf in enumerate(x.pfs):
-            next(pf)
-            lpyt[m] = pf.loglt
-        x.lpost += lpyt
-        if t > 0:
-            x.shared["Nxs"].append(x.pfs[0].N)
+
+        if self.mpi == 0 :
+            for m, pf in enumerate(x.pfs):
+                next(pf)
+                lpyt[m] = pf.loglt
+            x.lpost += lpyt
+            if t > 0:
+                x.shared["Nxs"].append(x.pfs[0].N)
+        else : 
+            # Broadcast request to other cores via message passing interface (mpi)
+            request = {'N' : None, 'Nx' : None, 't' : -2, 'move' : 0}
+            request = self.comm.bcast(request, root=0)
+            lpyt = self.run_pf_mpi(request['N'], request['Nx'], request['t'], request['move'])
+            x.lpost += lpyt
+            if t > 0:
+                x.shared["Nxs"].append(self.x_pfs[0].N)
         if we_increase_Nx:
             return lpyt + liw_Nx
         else:
@@ -1128,18 +1152,33 @@ class SMC2(FKSMCsampler):
 
     def current_target(self, t, Nx):
         def func(x):
-            x.pfs = FancyList(
-                [self.alg_instance(rec_to_dict(theta), Nx) for theta in x.theta]
-            )
-            x.lpost = self.prior.logpdf(x.theta)
-            if t >= 0:
-                is_finite = np.isfinite(x.lpost)
-                for m, pf in enumerate(x.pfs):
-                    if is_finite[m]:
-                        for _ in range(t + 1):
-                            next(pf)
-                        x.lpost[m] += pf.logLt
 
+            if self.mpi == 0 :
+                x.pfs = FancyList(
+                    [self.alg_instance(rec_to_dict(theta), Nx) for theta in x.theta]
+                )
+                x.lpost = self.prior.logpdf(x.theta)
+                if t >= 0:
+                    is_finite = np.isfinite(x.lpost)
+                    for m, pf in enumerate(x.pfs):
+                        if is_finite[m]:
+                            for _ in range(t + 1):
+                                next(pf)
+                            x.lpost[m] += pf.logLt
+            else :
+                # Broadcast request to other cores via message passing interface (mpi)
+                if t >= 0 : # MCMC step
+                    N = int(len(x.theta)/self.size)
+                    request = {'N' : N, 'Nx' : Nx, 't' : t, 'move' : 0}
+                    request = self.comm.bcast(request, root=0)
+                    x.lpost = self.run_pf_mpi(request['N'], request['Nx'], request['t'], request['move'], xp = x)
+                else :
+                    # create new pfs (t = -1)
+                    x.lpost = self.prior.logpdf(x.theta)
+                    N = int(len(x.theta)/self.size)
+                    request = {'N' : N, 'Nx' : Nx, 't' : t, 'move' : 0}
+                    request = self.comm.bcast(request, root=0)
+                    self.run_pf_mpi(request['N'], request['Nx'], request['t'], request['move'], xp = x)
         return func
 
     def _M0(self, N):
@@ -1151,11 +1190,101 @@ class SMC2(FKSMCsampler):
 
     def M(self, t, xp):
         if xp.shared["rs_flag"]:
-            return self.move(xp, self.current_target(t - 1, xp.pfs[0].N))
+            
+            if self.mpi == 0 :
+                return self.move(xp, self.current_target(t - 1, xp.pfs[0].N))
+            else :
+                
+                x = self.move(xp, self.current_target(t - 1, self.x_pfs[0].N))
+                
+                '''
+                    after moving the theta particles, 
+                    reinitiate the mpi_pfs for every core
+                    make sure the particles start at t (or t-1)
+                    and have the pfs sample their x_particles starting from y(t-1)
+                '''
+
+                # Broadcast the new theta_particles after mcmc move
+                N = int(len(x.theta)/self.size)
+                request = {'N' : N, 'Nx' : self.x_pfs[0].N, 't' : t - 1, 'move' : 1}
+                request = self.comm.bcast(request, root=0)
+                self.run_pf_mpi(request['N'], request['Nx'], request['t'], request['move'], xp = x)
+                return(x)
             # in IBIS, target at time t is posterior given y_0:t-1
         else:
             return xp
 
+    def rec_to_dict(self, arr):
+        """Turns record array *arr* into a dict"""
+        return dict(zip(sorted(self.prior.laws.keys()), arr))
+
+    def run_pf_mpi(self, N, Nx, t, move = 0, xp = None):
+        if t == -1 :
+            # initialize the pfs for every core after sampling from prior
+            self.thetas_mpi = np.empty((N,len(self.prior.laws.keys())))
+            if self.rank == 0 :
+                self.comm.Scatter(view_2d_array(xp.theta), self.thetas_mpi, root=0)
+            else :
+                self.comm.Scatter(None, self.thetas_mpi, root=0)
+            self.x_pfs = None
+            self.x_pfs = FancyList(
+                [self.alg_instance(self.rec_to_dict(theta), Nx) for theta in self.thetas_mpi]
+            )
+            return 0
+        elif t == -2 :
+            # run resample-move-reweight for the pfs in every core
+            x_loglt = np.empty(shape = len(self.x_pfs))
+            for m, pf in enumerate(self.x_pfs):        
+                next(pf)
+                x_loglt[m] = pf.loglt
+            recvbuf = None
+            if self.rank == 0:
+                recvbuf = np.empty(shape = len(self.x_pfs) * self.size)
+            self.comm.Gather(x_loglt, recvbuf, root=0)
+            return(recvbuf)
+        else :
+            if move == 0 : 
+                # mcmc step in waste-free fashion
+                self.thetas_mpi = np.empty((N,len(self.prior.laws.keys())))
+                if self.rank == 0 : 
+                    self.comm.Scatter(view_2d_array(xp.theta), self.thetas_mpi, root=0)
+                else :
+                    self.comm.Scatter(None, self.thetas_mpi, root=0)
+                self.x_pfs = None
+                self.x_pfs = FancyList(
+                    [self.alg_instance(self.rec_to_dict(theta), Nx) for theta in self.thetas_mpi]
+                )
+                lpost = self.prior.logpdf(self.thetas_mpi)
+                for m, pf in enumerate(self.x_pfs):
+                    if np.isfinite(lpost[m]):
+                        for _ in range(t + 1):
+                            next(pf)
+                        lpost[m] += pf.logLt
+                recvbuf = None
+                if self.rank == 0:
+                    recvbuf = np.empty(shape = N * self.size)
+                self.comm.Gather(lpost, recvbuf, root=0)
+                return(recvbuf)
+            else :
+                # initializing pfs after mcmc move
+                self.thetas_mpi = np.empty((N,len(self.prior.laws.keys())))
+                if self.rank == 0 :
+                    self.comm.Scatter(view_2d_array(xp.theta), self.thetas_mpi, root=0)
+                else :
+                    self.comm.Scatter(None, self.thetas_mpi, root=0)
+                self.x_pfs = None
+                self.x_pfs = FancyList(
+                    [self.alg_instance(self.rec_to_dict(theta), Nx) for theta in self.thetas_mpi]
+                )
+                for _, pf in enumerate(self.x_pfs):
+                    pf.generate_particles_starting_at(t = t-1)
+                    pf.X = pf.fk.M(pf.t, pf.Xp)
+                    pf.t += 1
+                    pf.reweight_particles()
+                    pf.log_mean_w = pf.wgts.log_mean
+                    pf.compute_summaries()
+                return 0
+            
     def exchange_step(self, x, t, new_Nx):
         old_lpost = x.lpost.copy()
         # exchange step occurs at beginning of step t, so y_t not processed yet
@@ -1164,4 +1293,7 @@ class SMC2(FKSMCsampler):
 
     def summary_format(self, smc):
         msg = super().summary_format(smc)
-        return msg + ", Nx=%i" % smc.X.pfs[0].N
+        if self.mpi == 0 :
+            return msg + ", Nx=%i" % smc.X.pfs[0].N
+        else :
+            return msg + ", Nx=%i" % self.x_pfs[0].N

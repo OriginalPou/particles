@@ -371,8 +371,8 @@ class GuidedPF(Bootstrap):
     Argument ssm must implement methods `proposal0` and `proposal`.
     """
 
-    def M0(self, N):
-        return self.ssm.proposal0(self.data).rvs(size=N)
+    def M0(self, N, t = None):
+        return self.ssm.proposal0(self.data, t).rvs(size=N)
 
     def M(self, t, xp):
         return self.ssm.proposal(t, xp, self.data).rvs(size=xp.shape[0])

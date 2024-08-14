@@ -319,6 +319,11 @@ class SMC:
             self.X = self.fk.Gamma0(u)
         else:
             self.X = self.fk.M0(self.N)
+    
+    def generate_particles_starting_at(self, t):
+        self.Xp = self.fk.M0(self.N, t)
+        #self.Xp = self.fk.M0(self.N, t-1)
+        self.t = t+1
 
     def reweight_particles(self):
         self.wgts = self.wgts.add(self.fk.logG(self.t, self.Xp, self.X))
