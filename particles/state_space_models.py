@@ -314,10 +314,13 @@ class Bootstrap(particles.FeynmanKac):
         considered state-space model
     """
 
-    def __init__(self, ssm=None, data=None):
+    def __init__(self, ssm=None, data=None, mpi = 0):
         self.ssm = ssm
         self.data = data
         self.du = self.ssm.PX0().dim
+        
+        #use Memory Parallel Interface
+        self.isMPI = mpi
 
     @property
     def T(self):

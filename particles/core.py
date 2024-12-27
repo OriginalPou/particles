@@ -334,12 +334,18 @@ class SMC:
             self.A = rs.resampling(self.resampling, self.aux.W, M=self.N)
             # we always resample self.N particles, even if smc.X has a
             # different size (example: waste-free)
+            '''
+            This chooses N theta and N pfs out of N*mcmc_steps ThetaParticles
+            '''
             self.Xp = self.X[self.A]
             self.reset_weights()
         else:
             self.A = np.arange(self.N)
             self.Xp = self.X
-        self.X = self.fk.M(self.t, self.Xp)
+        if self.fk.isMPI:
+            self.X = self.fk.M(self.t, self.Xp, self.A)
+        else:
+            self.X = self.fk.M(self.t, self.Xp)
 
     def resample_move_qmc(self):
         self.rs_flag = True  # we *always* resample in SQMC

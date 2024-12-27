@@ -283,6 +283,9 @@ class Normal(LocScaleDist):
         varp = 1.0 / (pr0 + prd)  # posterior variance
         mu = varp * (pr0 * self.loc + prd * x.mean())
         return Normal(loc=mu, scale=np.sqrt(varp))
+    
+    def __str__(self):
+        return f"Normal(loc={self.loc}, scale={self.scale})"
 
 
 class Logistic(LocScaleDist):
@@ -413,6 +416,9 @@ class Uniform(ProbDist):
     def ppf(self, u):
         return stats.uniform.ppf(u, loc=self.a, scale=self.scale)
 
+    def __str__(self):
+        return f"Uniform(a={self.a}, b={self.b})"
+
 
 class Student(ProbDist):
     """Student distribution."""
@@ -503,6 +509,9 @@ class TruncNormal(ProbDist):
         varp = 1.0 / (pr0 + prd)  # posterior variance
         mu = varp * (pr0 * self.mu + prd * x.mean())
         return TruncNormal(mu=mu, sigma=np.sqrt(varp), a=self.a, b=self.b)
+    
+    def __str__(self):
+        return f"TruncNormal(mu={self.mu}, sigma={self.sigma}, a={self.a}, b={self.b})"
 
 
 ########################
@@ -974,6 +983,9 @@ class MvNormal(ProbDist):
         mupost = Sigpost @ (m @ covinv + Siginv @ np.sum(x, axis=0))
         # m @ covinv works whether the shape of m is (N, d) or (d)
         return MvNormal(loc=mupost, cov=Sigpost)
+    
+    def __str__(self):
+        return f"MvNormal(loc={self.loc}, scale={self.scale}, cov={self.cov})"
 
 
 class VaryingCovNormal(MvNormal):
@@ -1187,3 +1199,7 @@ class StructDist(ProbDist):
             cond_law = law(out) if callable(law) else law
             out[par] = cond_law.rvs(size=size)
         return out
+    
+    def __str__(self):
+        laws_str = "\n".join([f"{key}: {law}" for key, law in self.laws.items()])
+        return f"StructDist with laws:\n{laws_str}"
